@@ -2,7 +2,7 @@
 
 set -e # flag exit if error
 
-DOCKER_ROOT="$HOME/.docker"
+DOCKER_ROOT="$HOME/.local/share/docker"
 
 echo -e '\e[0;33mInstalling docker...\e[0m'
 
