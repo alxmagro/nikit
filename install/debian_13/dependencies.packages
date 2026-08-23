@@ -2,7 +2,9 @@
 curl
 wget
 gnupg2
-xclip
+
+# Reads and writes the Wayland clipboard, for nikit clip
+wl-clipboard
 
 # Renders the QR code printed by the lanip function
 qrencode

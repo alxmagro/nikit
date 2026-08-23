@@ -19,6 +19,7 @@ wget -qO - https://raw.githubusercontent.com/alxmagro/nikit/main/get.sh | bash -
   - `Super` + `Alt` + arrows carry the window along;
   - `Alt+Tab` walks windows instead of applications;
 - Scripts:
+  - `nikit clip`: carry the clipboard to another machine;
   - `nikit gnome-extensions`: store and sync your GNOME extensions and their settings;
   - `gistpad`: named notes kept as secret gists;
   - `goto`: jump to named folders from anywhere;
