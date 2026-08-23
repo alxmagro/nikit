@@ -349,7 +349,9 @@ _nikit_ext_show() {
 _nikit_ext_install_site() {
   local uuid="$1" version="$2" info path zip status=1
 
-  info=$(curl -fsSL "$_nikit_ext_site/extension-info/?uuid=$uuid&shell_version=$version") || return 1
+  # Not published for this shell version is an ordinary answer, not something
+  # to print, so curl keeps quiet about the 404.
+  info=$(curl -fsL "$_nikit_ext_site/extension-info/?uuid=$uuid&shell_version=$version" 2>/dev/null) || return 1
 
   path=$(printf '%s' "$info" | jq -r '.download_url // empty')
   [ -n "$path" ] || return 1
@@ -364,10 +366,100 @@ _nikit_ext_install_site() {
   return $status
 }
 
+# GNOME never takes a uuid out of enabled-extensions, so the key collects the
+# name of every extension ever tried. Anything in it that is not on disk is
+# dead weight; an installed extension that is merely switched off is not in
+# the key at all, so the two never get confused.
+_nikit_ext_cleanup() {
+  local installed key ghosts kept reply
+
+  installed=$(gnome-extensions list | sort)
+  key=$(gsettings get org.gnome.shell enabled-extensions |
+    tr -d "[]'" | tr ',' '\n' | sed 's/^ *//' | awk 'NF' | sort -u)
+
+  ghosts=$(comm -13 <(printf '%s\n' "$installed") <(printf '%s\n' "$key"))
+
+  if [ -z "$ghosts" ]; then
+    echo "Nothing to clean up."
+    return 0
+  fi
+
+  printf '  %s\n' $ghosts
+  echo
+
+  read -rp "Drop these $(printf '%s\n' "$ghosts" | grep -c .) from the enabled list? (y/N) " reply < /dev/tty
+
+  case "$reply" in
+    [yY] | [yY][eE][sS]) ;;
+    *) return 1 ;;
+  esac
+
+  kept=$(comm -12 <(printf '%s\n' "$installed") <(printf '%s\n' "$key") |
+    awk "NF { printf \"%s'%s'\", sep, \$0; sep = \", \" }")
+
+  gsettings set org.gnome.shell enabled-extensions "[$kept]"
+  echo "Cleaned."
+}
+
+# Puts the machine back to a stock GNOME, so a restore can be tested for
+# real. Nothing here touches the gist.
+_nikit_ext_reset() {
+  local dir installed uuid reply
+
+  installed=$(gnome-extensions list)
+
+  echo "This removes, for your user:"
+  echo "  every extension installed under $(_nikit_ext_dir)"
+  echo "  the list of enabled extensions"
+  echo "  every extension setting under $_nikit_ext_base"
+  echo
+
+  if [ -n "$installed" ]; then
+    printf '  %s\n' $installed
+  else
+    echo "  (nothing is installed)"
+  fi
+
+  echo
+  read -rp "Type 'reset' to go ahead: " reply < /dev/tty
+  [ "$reply" = "reset" ] || return 1
+
+  while read -r uuid; do
+    [ -n "$uuid" ] && gnome-extensions uninstall "$uuid" > /dev/null 2>&1
+  done <<< "$installed"
+
+  gsettings reset org.gnome.shell enabled-extensions
+  dconf reset -f "$_nikit_ext_base"
+
+  dir=$(_nikit_ext_dir)
+  [ -d "$dir" ] && rm -rf "${dir:?}"/*
+
+  echo "Reset. Log out and back in."
+}
+
 # Only what extensions.gnome.org publishes. Installing from an arbitrary
 # repository would mean running its build as you, on the word of a gist.
+# `gnome-extensions enable` is ignored for an extension the running shell has
+# not loaded yet, which is every one just installed. Writing the key directly
+# works now and survives the logout.
+_nikit_ext_enable() {
+  local current merged
+
+  current=$(gsettings get org.gnome.shell enabled-extensions |
+    tr -d "[]'" | tr ',' '\n' | sed 's/^ *//')
+
+  merged=$(
+    {
+      printf '%s\n' "$current"
+      cat
+    } | awk "NF && !seen[\$0]++ { printf \"%s'%s'\", sep, \$0; sep = \", \" }"
+  )
+
+  gsettings set org.gnome.shell enabled-extensions "[$merged]"
+}
+
 _nikit_ext_restore() {
-  local id dir version uuid failed=() installed=0
+  local id dir version uuid failed=() enabled=() installed=0
 
   id=$(_nikit_ext_gist)
 
@@ -396,21 +488,24 @@ _nikit_ext_restore() {
 
     if gnome-extensions list | grep -qx "$uuid"; then
       :
-    elif ! _nikit_ext_install_site "$uuid" "$version"; then
+    elif _nikit_ext_install_site "$uuid" "$version"; then
+      installed=$((installed + 1))
+    else
       failed+=("$uuid")
       continue
     fi
 
-    gnome-extensions enable "$uuid" 2>/dev/null
-    installed=$((installed + 1))
+    enabled+=("$uuid")
 
     [ -f "$dir/$uuid.dconf" ] &&
       dconf load "$_nikit_ext_base" < "$dir/$uuid.dconf"
   done < "$dir/$_nikit_ext_manifest"
 
+  [ ${#enabled[@]} -gt 0 ] && printf '%s\n' "${enabled[@]}" | _nikit_ext_enable
+
   rm -rf "$dir"
 
-  echo "Restored $installed extension(s)."
+  echo "Installed $installed, enabled ${#enabled[@]}."
 
   if [ ${#failed[@]} -gt 0 ]; then
     echo
@@ -434,6 +529,8 @@ _nikit_gnome_extensions() {
     sync) _nikit_ext_sync ;;
     edit) _nikit_ext_edit ;;
     restore) _nikit_ext_restore ;;
+    reset) _nikit_ext_reset ;;
+    cleanup) _nikit_ext_cleanup ;;
     show)
       shift
       _nikit_ext_show "$@"
@@ -445,6 +542,8 @@ _nikit_gnome_extensions() {
       echo "  sync               Send this machine's settings for the ones you mark" >&2
       echo "  edit               Change what is stored, without reading this machine" >&2
       echo "  restore            Install and configure them on this machine" >&2
+      echo "  reset              Strip this machine back to a stock GNOME" >&2
+      echo "  cleanup            Forget extensions that are enabled but not installed" >&2
       echo "  show [--config]    Print the stored list, or the stored settings" >&2
       return 1
       ;;
