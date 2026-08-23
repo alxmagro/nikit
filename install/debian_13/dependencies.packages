@@ -1,0 +1,17 @@
+# Base tools the other install scripts rely on
+curl
+wget
+gnupg2
+xclip
+
+# Renders the QR code printed by the lanip function
+qrencode
+
+# Builds the JSON body gistpad sends to the gists API
+jq
+
+# GitHub CLI, used for auth and gists
+gh
+
+# The picker behind gistpad
+fzf
