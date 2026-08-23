@@ -346,24 +346,22 @@ _nikit_ext_show() {
   rm -rf "$dir"
 }
 
+# The shell downloads, unpacks and loads the extension itself, which is the
+# path the Extensions app takes. It asks before each one, and that is the
+# point: nothing lands without you seeing it. Returns 2 when you say no.
 _nikit_ext_install_site() {
-  local uuid="$1" version="$2" info path zip status=1
+  local uuid="$1" result
 
-  # Not published for this shell version is an ordinary answer, not something
-  # to print, so curl keeps quiet about the 404.
-  info=$(curl -fsL "$_nikit_ext_site/extension-info/?uuid=$uuid&shell_version=$version" 2>/dev/null) || return 1
+  result=$(gdbus call --session \
+    --dest org.gnome.Shell \
+    --object-path /org/gnome/Shell \
+    --method org.gnome.Shell.Extensions.InstallRemoteExtension "$uuid" 2>/dev/null) || return 1
 
-  path=$(printf '%s' "$info" | jq -r '.download_url // empty')
-  [ -n "$path" ] || return 1
-
-  zip=$(mktemp --suffix=.zip)
-
-  curl -fsSL "$_nikit_ext_site$path" -o "$zip" &&
-    gnome-extensions install --force "$zip" &&
-    status=0
-
-  rm -f "$zip"
-  return $status
+  case "$result" in
+    *successful*) return 0 ;;
+    *cancelled*) return 2 ;;
+    *) return 1 ;;
+  esac
 }
 
 # GNOME never takes a uuid out of enabled-extensions, so the key collects the
@@ -459,7 +457,7 @@ _nikit_ext_enable() {
 }
 
 _nikit_ext_restore() {
-  local id dir version uuid failed=() enabled=() installed=0
+  local id dir version uuid failed=() refused=() enabled=() installed=0
 
   id=$(_nikit_ext_gist)
 
@@ -488,11 +486,16 @@ _nikit_ext_restore() {
 
     if gnome-extensions list | grep -qx "$uuid"; then
       :
-    elif _nikit_ext_install_site "$uuid" "$version"; then
-      installed=$((installed + 1))
     else
-      failed+=("$uuid")
-      continue
+      echo "Installing $uuid..."
+
+      _nikit_ext_install_site "$uuid"
+
+      case $? in
+        0) installed=$((installed + 1)) ;;
+        2) refused+=("$uuid"); continue ;;
+        *) failed+=("$uuid"); continue ;;
+      esac
     fi
 
     enabled+=("$uuid")
@@ -505,16 +508,21 @@ _nikit_ext_restore() {
 
   rm -rf "$dir"
 
-  echo "Installed $installed, enabled ${#enabled[@]}."
-
   if [ ${#failed[@]} -gt 0 ]; then
     echo
-    echo "Not published for GNOME $version, install these by hand:"
+    echo "The shell could not install these, most likely because they are"
+    echo "not published for GNOME $version:"
     printf '  %s\n' "${failed[@]}"
   fi
 
+  if [ ${#refused[@]} -gt 0 ]; then
+    echo
+    echo "Declined at the prompt:"
+    printf '  %s\n' "${refused[@]}"
+  fi
+
   echo
-  echo "Log out and back in for the shell to pick them up."
+  echo "Done. Installed $installed, enabled ${#enabled[@]}."
 }
 
 _nikit_gnome_extensions() {
