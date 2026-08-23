@@ -20,3 +20,4 @@ run install/debian_13/modules/git.sh
 run install/debian_13/modules/bash_aliases.sh
 run install/debian_13/modules/nano.sh
 run install/debian_13/modules/gnome_keybindings.sh
+run install/debian_13/modules/gnome_tweaks.sh
