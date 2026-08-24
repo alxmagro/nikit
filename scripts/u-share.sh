@@ -1,8 +1,8 @@
 # Carry one thing between machines through a gist, encrypted end to end.
 #
-#   u-share -w [file|-]    send the clipboard, a file, or stdin
-#   u-share -r [file|-]    receive into the clipboard, a file, or stdout
-#   u-share clear          drop what is stored
+#   u-copy  [file|-]    send the clipboard, a file, or stdin
+#   u-paste [file|-]    receive into the clipboard, a file, or stdout
+#   u-copy -c           drop what is stored, sending nothing
 #
 # The payload is a tar holding two members, so the kind and the original
 # filename travel inside the encryption instead of in the gist listing:
@@ -393,22 +393,21 @@ _u_share_clear() {
   echo "Cleared."
 }
 
-_u_share_usage() {
-  echo "Usage: u-share -w|-r [file|-]"
-  echo
-  echo "  -w [file|-]   Send the clipboard, a file, or stdin"
-  echo "  -r [file|-]   Receive into the clipboard, a file, or stdout"
-  echo "  clear         Drop what is stored, without receiving it"
-  echo
-  echo "Options:"
-  echo "  -k, --keep    Leave it stored after receiving"
-  echo "  -f, --force   Replace an existing file without asking"
-}
+# Both commands parse the same way, so the loop lives here and each one says
+# which flags it knows. $_u_share_dest and the switches come back through
+# these, since a function cannot return more than a number.
+_u_share_dest=""
+_u_share_flags=""
 
-u-share() {
-  local mode="" dest="" keep="" force="" arg i args=()
+_u_share_parse() {
+  local name="$1" allowed="$2" arg i args=()
 
-  # Bundled short options, so -rk reads the same as -r -k. A lone '-' is the
+  shift 2
+
+  _u_share_dest=""
+  _u_share_flags=""
+
+  # Bundled short options, so -kf reads the same as -k -f. A lone '-' is the
   # stream marker and a long option is one word, so neither gets split.
   for arg in "$@"; do
     case "$arg" in
@@ -426,17 +425,8 @@ u-share() {
 
   while [ $# -gt 0 ]; do
     case "$1" in
-      -w | --write) mode="write" ;;
-      -r | --read) mode="read" ;;
-      clear) mode="clear" ;;
-      -k | --keep) keep=1 ;;
-      -f | --force) force=1 ;;
-      -h | --help)
-        _u_share_usage
-        return 0
-        ;;
       -)
-        dest="-"
+        _u_share_dest="-"
         ;;
       # Everything after this is a name, however much it looks like a flag.
       # A file manager hands over whatever the file is called, and a file
@@ -445,40 +435,89 @@ u-share() {
         shift
 
         if [ $# -gt 1 ]; then
-          echo "u-share: only one file at a time" >&2
+          echo "$name: only one file at a time" >&2
           return 1
         fi
 
-        [ $# -eq 1 ] && dest="$1"
+        [ $# -eq 1 ] && _u_share_dest="$1"
         break
         ;;
       -*)
-        echo "u-share: no such option '$1'" >&2
-        return 1
+        arg="${1#-}"
+        arg="${arg#-}"
+
+        case ":$allowed:" in
+          *":$arg:"*) _u_share_flags+="${arg:0:1}" ;;
+          *)
+            echo "$name: no such option '$1'" >&2
+            return 1
+            ;;
+        esac
         ;;
       *)
-        if [ -n "$dest" ]; then
-          echo "u-share: only one file at a time" >&2
+        if [ -n "$_u_share_dest" ]; then
+          echo "$name: only one file at a time" >&2
           return 1
         fi
 
-        dest="$1"
+        _u_share_dest="$1"
         ;;
     esac
 
     shift
   done
+}
 
-  if [ -z "$mode" ]; then
-    _u_share_usage >&2
-    return 1
-  fi
+_u_share_has() {
+  [[ "$_u_share_flags" == *"$1"* ]]
+}
 
+u-copy() {
+  case " $* " in
+    *" -h "* | *" --help "*)
+      echo "Usage: u-copy [file|-]"
+      echo
+      echo "  (nothing)     Send what is on the clipboard"
+      echo "  file          Send that file"
+      echo "  -             Send stdin"
+      echo
+      echo "Options:"
+      echo "  -c, --clear   Drop what is stored, sending nothing"
+      return 0
+      ;;
+  esac
+
+  _u_share_parse "u-copy" "c:clear" "$@" || return 1
   _u_share_ready || return 1
 
-  case "$mode" in
-    write) _u_share_write "$dest" ;;
-    read) _u_share_read "$dest" "$keep" "$force" ;;
-    clear) _u_share_clear ;;
+  if _u_share_has c; then
+    _u_share_clear
+    return
+  fi
+
+  _u_share_write "$_u_share_dest"
+}
+
+u-paste() {
+  case " $* " in
+    *" -h "* | *" --help "*)
+      echo "Usage: u-paste [file|-]"
+      echo
+      echo "  (nothing)     Put it back on the clipboard"
+      echo "  file          Write it there, asking before replacing"
+      echo "  -             Write it to stdout"
+      echo
+      echo "Options:"
+      echo "  -k, --keep    Leave it stored instead of consuming it"
+      echo "  -f, --force   Replace an existing file without asking"
+      return 0
+      ;;
   esac
+
+  _u_share_parse "u-paste" "k:keep:f:force" "$@" || return 1
+  _u_share_ready || return 1
+
+  _u_share_read "$_u_share_dest" \
+    "$(_u_share_has k && echo 1)" \
+    "$(_u_share_has f && echo 1)"
 }
