@@ -9,9 +9,9 @@
 
 set -eo pipefail
 
-repo="${NIKIT_REPO:-alxmagro/nikit}"
-ref="${NIKIT_REF:-main}"
-src="${NIKIT_SRC:-$(mktemp -d)}"
+repo="alxmagro/nikit"
+ref="main"
+src="$(mktemp -d)"
 url="https://github.com/$repo/archive/refs/heads/$ref.tar.gz"
 
 trap 'rm -rf "$src"' EXIT
