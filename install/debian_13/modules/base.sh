@@ -2,6 +2,15 @@
 
 set -e
 
+# Here rather than in run.sh, so that installing a single module still gets
+# the packages it needs: run.sh only runs when no module is named.
+DEPENDENCIES=$(packages install/debian_13/dependencies) || exit 1
+
+log "Installing dependencies: $(echo $DEPENDENCIES)"
+
+apt_update > /dev/null
+apt_install $DEPENDENCIES > /dev/null
+
 log 'Setting up nikit...'
 
 ensure_folder "$PROJECT_ROOT/bin" "$PROJECT_ROOT/scripts" "$PROJECT_ROOT/config"

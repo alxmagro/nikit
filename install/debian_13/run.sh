@@ -2,14 +2,6 @@
 #
 # Sourced by install.sh, which provides run() and the helpers.
 
-DEPENDENCIES=$(packages install/debian_13/dependencies) || exit 1
-
-echo -e "\e[0;34m- dependencies\e[0m"
-log "$(echo $DEPENDENCIES)"
-
-apt_update > /dev/null
-apt_install $DEPENDENCIES > /dev/null
-
 run install/debian_13/modules/base.sh
 run install/debian_13/modules/scripts.sh
 run install/debian_13/modules/docker.sh
