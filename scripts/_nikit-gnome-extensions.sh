@@ -1,7 +1,7 @@
 # GNOME extensions kept in a gist: which ones to install, and how each one
 # is configured. One file per extension, so saving one leaves the rest alone.
 
-_nikit_ext_description="nikit: gnome-extensions"
+_nikit_ext_description="nikit.gnome-extensions"
 _nikit_ext_manifest="_gnome-extensions.list"
 _nikit_ext_base="/org/gnome/shell/extensions/"
 _nikit_ext_site="https://extensions.gnome.org"

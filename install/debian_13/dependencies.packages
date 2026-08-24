@@ -3,7 +3,7 @@ curl
 wget
 gnupg2
 
-# Reads and writes the Wayland clipboard, for nikit clip
+# Reads and writes the Wayland clipboard, for u-share
 wl-clipboard
 
 # Renders the QR code printed by the lanip function
@@ -17,3 +17,6 @@ gh
 
 # The picker behind gistpad
 fzf
+
+# Encrypts what u-share carries, to the SSH keys on the GitHub account
+age
