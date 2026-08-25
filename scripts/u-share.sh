@@ -165,9 +165,27 @@ _u_share_collect() {
     return
   fi
 
-  if ! wl-paste --no-newline --type text/plain > "$dir/data" 2> /dev/null; then
+  # Naming 'text/plain' outright is wrong. The set of types on offer belongs
+  # to whoever owns the clipboard, and that changes: once the application
+  # that copied is closed, GNOME takes over and offers only
+  # 'text/plain;charset=utf-8'. Older applications offer only the X11 names.
+  # Take whichever is actually there.
+  local text_type="" candidate
+  for candidate in 'text/plain;charset=utf-8' 'text/plain' 'UTF8_STRING' 'STRING' 'TEXT'; do
+    if grep -qxF "$candidate" <<< "$types"; then
+      text_type="$candidate"
+      break
+    fi
+  done
+
+  if [ -z "$text_type" ]; then
     echo "The clipboard holds nothing this can carry." >&2
-    echo "Check what is in it with: wl-paste --list-types" >&2
+    echo "It offers: $(echo "$types" | tr '\n' ' ')" >&2
+    return 1
+  fi
+
+  if ! wl-paste --no-newline --type "$text_type" > "$dir/data" 2> /dev/null; then
+    echo "Could not read the clipboard as '$text_type'." >&2
     return 1
   fi
 
