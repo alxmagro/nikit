@@ -1,0 +1,296 @@
+#!/usr/bin/env python3
+"""App Grid folders kept in a gist: which folders exist and what goes in each.
+
+GNOME ships none of these. The schema default for folder-children is empty, so
+a fresh install starts with every application loose in the grid, and everything
+you have was written by dragging one icon onto another.
+
+What is stored is deliberately not a dconf dump. dconf identifies a folder by a
+path segment that is a different random uuid on every machine, and writes
+application ids with a .desktop suffix that never varies. Neither helps a
+person reading the file, and the uuid actively hurts: the same folder would not
+line up across two machines. So the folder is keyed by the name you see, and
+the ids are put back on restore:
+
+    [Programming]
+    apps=['org.gnome.Console', 'code']
+
+Sections come out in the order the grid shows the folders, which is not the
+order of folder-children — that is creation order. The grid order lives in
+app-picker-layout, and this only reads it: writing that key makes the Shell
+rebuild the whole grid, and an extension holding a reference to a folder view
+it destroys takes the session down with it. GNOME sorts the grid alphabetically
+on its own, and that is left alone.
+"""
+
+import os
+import re
+import sys
+import uuid as uuidlib
+from glob import glob
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), os.pardir))
+
+from lib import editor, gist, settings  # noqa: E402
+
+DESCRIPTION = "nikit.app-folders"
+FILENAME = "app-folders.conf"
+BASE = "/org/gnome/desktop/app-folders/"
+SCHEMA = "org.gnome.desktop.app-folders"
+FOLDER_SCHEMA = "org.gnome.desktop.app-folders.folder"
+SHELL_SCHEMA = "org.gnome.shell"
+LAYOUT = "app-picker-layout"
+DESKTOP_DIRS = "/usr/share/desktop-directories"
+APPLICATIONS = "/usr/share/applications"
+
+USAGE = """Usage: nikit app-folders <subcommand>
+
+Subcommands:
+  sync      Send this machine's folders, opening them for review
+  edit      Change what is stored, without reading this machine
+  restore   Lay them out on this machine"""
+
+
+def main(argv):
+    if not os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
+        print("No desktop session: dconf and gsettings need one.", file=sys.stderr)
+        return 1
+
+    try:
+        gist.ready()
+
+        command = argv[0] if argv else ""
+
+        if command == "sync":
+            return cmd_sync()
+        if command == "edit":
+            return cmd_edit()
+        if command == "restore":
+            return cmd_restore()
+    except gist.GistError as error:
+        print(error, file=sys.stderr)
+        return 1
+
+    print(USAGE, file=sys.stderr)
+
+    return 1
+
+
+def cmd_sync():
+    folders = _read()
+
+    if not folders:
+        print("This machine has no folder with anything in it.", file=sys.stderr)
+        return 1
+
+    gist_id = gist.find(DESCRIPTION)
+    stored = gist.read(gist_id, FILENAME) if gist_id else ""
+
+    return _commit(_format(folders), gist_id, stored)
+
+
+def cmd_edit():
+    """Reads only what is stored, so it works from a machine that has none of
+    it."""
+    gist_id = gist.find(DESCRIPTION)
+
+    if not gist_id:
+        _missing()
+        return 1
+
+    # The buffer is what is stored: editing starts from it and replaces it.
+    stored = gist.read(gist_id, FILENAME)
+
+    return _commit(stored, gist_id, stored)
+
+
+def cmd_restore():
+    gist_id = gist.find(DESCRIPTION)
+
+    if not gist_id:
+        _missing()
+        return 1
+
+    folders = _parse(gist.read(gist_id, FILENAME))
+
+    if not folders:
+        print("What is stored has no folder in it.", file=sys.stderr)
+        return 1
+
+    # Wiped first, or a second run would add the same folders again under
+    # fresh uuids. This is also what makes the grid match the file exactly
+    # rather than merging into whatever was already here.
+    settings.reset_tree(BASE)
+
+    ids = []
+
+    for name, apps in folders:
+        folder_id = str(uuidlib.uuid4())
+        ids.append(folder_id)
+
+        folder = settings.at(FOLDER_SCHEMA, f"{BASE}folders/{folder_id}/")
+        folder.set_string("name", name)
+        # The suffix is what GNOME wants and what the file leaves out.
+        folder.set_strv("apps", [f"{app}.desktop" for app in apps])
+
+    settings.set_list(SCHEMA, "folder-children", ids)
+
+    print(f"Restored {len(folders)} folders.")
+    print(
+        "An application not installed here is simply not drawn, "
+        "and appears the day it is."
+    )
+
+    return 0
+
+
+def _missing():
+    print("Nothing stored.", file=sys.stderr)
+    print(
+        "Run 'nikit app-folders sync' on the machine that has the folders.",
+        file=sys.stderr,
+    )
+
+
+def _placed():
+    """What the layout holds, as {id: position}."""
+    pages = settings.get_value(SHELL_SCHEMA, LAYOUT)
+
+    return {
+        item: entry["position"]
+        for page in pages
+        for item, entry in page.items()
+        if "position" in entry
+    }
+
+
+def _ordered():
+    """Folders in the order the grid shows them. A folder the layout does not
+    mention has never been placed, so it follows the ones that have."""
+    children = settings.get_list(SCHEMA, "folder-children")
+    placed = _placed()
+
+    return sorted(children, key=lambda i: placed.get(i, len(placed) + 1))
+
+
+def _name(folder_id):
+    """The name in dconf is not always the name in the grid: the folders GNOME
+    seeds carry a .directory filename and translate=true, and the label lives
+    in that file. Only reading cares — what gets stored is the plain name, and
+    restore writes it back literally. A folder the user named is a folder the
+    user named, in any language.
+    """
+    folder = settings.at(FOLDER_SCHEMA, f"{BASE}folders/{folder_id}/")
+    name = folder.get_string("name")
+
+    if folder.get_boolean("translate"):
+        try:
+            with open(os.path.join(DESKTOP_DIRS, name)) as handle:
+                found = re.search(r"^Name=(.*)$", handle.read(), re.M)
+
+            if found:
+                name = found.group(1)
+        except OSError:
+            pass
+
+    return name or folder_id
+
+
+def _apps(folder_id):
+    """A folder holds either an explicit list of desktop files or a set of
+    categories to match. The second kind stores no applications at all, so
+    seeing what is in it means resolving the categories against what is
+    installed. Storing the result turns it into an explicit list, which is what
+    the user sees in the grid anyway.
+    """
+    folder = settings.at(FOLDER_SCHEMA, f"{BASE}folders/{folder_id}/")
+    apps = folder.get_strv("apps")
+
+    if apps:
+        return apps
+
+    found = []
+
+    for category in folder.get_strv("categories"):
+        for path in sorted(glob(os.path.join(APPLICATIONS, "*.desktop"))):
+            with open(path, errors="replace") as handle:
+                if re.search(rf"^Categories=.*{re.escape(category)}", handle.read(), re.M):
+                    found.append(os.path.basename(path))
+
+    return found
+
+
+def _read():
+    """This machine, as [(name, apps)]. Folders whose categories match nothing
+    installed never appear in the grid, so they are not offered either."""
+    folders = []
+
+    for folder_id in _ordered():
+        apps = [a[: -len(".desktop")] for a in _apps(folder_id) if a]
+
+        if apps:
+            folders.append((_name(folder_id), apps))
+
+    return folders
+
+
+def _format(folders):
+    return "\n\n".join(
+        "[{}]\napps=[{}]".format(name, ", ".join(f"'{a}'" for a in apps))
+        for name, apps in folders
+    )
+
+
+def _parse(body):
+    """The stored format, back into [(name, apps)]. Order is kept: it is what
+    the sections are for."""
+    folders, name = [], None
+
+    for line in body.splitlines():
+        header = re.match(r"^\[(.*)\]$", line)
+
+        if header:
+            name = header.group(1)
+        elif name and line.startswith("apps="):
+            folders.append((name, re.findall(r"'([^']*)'", line)))
+            name = None
+
+    return folders
+
+
+def _commit(buffer, gist_id, stored):
+    """Opens a buffer and stores whatever comes back. A folder is two lines, so
+    an editor beats a picker: it does the same choosing and also lets a folder
+    be renamed or an application dropped in the same pass.
+
+    What is stored comes in rather than being looked up: both callers already
+    hold it, and asking GitHub twice for the same file costs more than
+    everything else this does.
+    """
+    after, edited = editor.open_buffer(buffer, FILENAME)
+
+    # With nothing stored there is nothing to leave alone, so leaving the
+    # editor is enough. Once something is stored, only a change replaces it.
+    if _parse(stored) and not edited:
+        print("No changes, nothing stored.")
+        return 0
+
+    folders = _parse(after)
+
+    if not folders:
+        print("No folder left in the buffer, nothing stored.", file=sys.stderr)
+        return 1
+
+    if gist_id:
+        gist.write(gist_id, FILENAME, after)
+        print("Stored.")
+    else:
+        print(f"Stored at {gist.create(DESCRIPTION, FILENAME, after)}")
+
+    print("Folders: " + ", ".join(name for name, _ in folders))
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

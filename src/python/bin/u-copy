@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""u-copy - Send the clipboard, a file, or stdin to another machine.
+
+    u-copy              Send what is on the clipboard
+    u-copy file         Send that file
+    u-copy -            Send stdin
+    u-copy -c           Drop what is stored, sending nothing
+
+What is on the clipboard decides what travels: a file copied in the file
+manager goes as that file, a screenshot goes as an image, anything else goes as
+text. The file types are checked first, because a file copied in the file
+manager also offers text/plain holding its path.
+"""
+
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), os.pardir))
+
+from lib import clipboard, share  # noqa: E402
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(
+        prog="u-copy", description="Send the clipboard, a file, or stdin."
+    )
+    parser.add_argument("file", nargs="?", help="a file, or - for stdin")
+    parser.add_argument(
+        "-c", "--clear", action="store_true", help="drop what is stored"
+    )
+
+    args = parser.parse_args(argv)
+
+    try:
+        share.ready()
+
+        if args.clear:
+            return clear()
+
+        kind, name, data, mime = collect(args.file)
+        share.store(kind, name, data, mime)
+    except (share.ShareError, clipboard.ClipboardError) as error:
+        print(error, file=sys.stderr)
+        return 1
+
+    print(f"Sent {kind} ({len(data)} bytes).")
+
+    return 0
+
+
+def clear():
+    gist_id = share.find()
+
+    if not gist_id:
+        print("Nothing stored.", file=sys.stderr)
+        return 1
+
+    share.drop(gist_id)
+    print("Cleared.")
+
+    return 0
+
+
+def collect(source):
+    """What travels, as (kind, name, data, mime). Decided here and nowhere
+    else, so the receiving side stays dumb."""
+    if source == "-":
+        return "text", "stdin", sys.stdin.buffer.read(), None
+
+    if source:
+        if not os.path.isfile(source):
+            raise share.ShareError(f"Not a file: {source}")
+
+        with open(source, "rb") as handle:
+            return "file", os.path.basename(source), handle.read(), None
+
+    return _from_clipboard()
+
+
+def _from_clipboard():
+    clipboard.ready()
+    offered = clipboard.types()
+
+    if clipboard.FILES_TYPE in offered:
+        path = clipboard.file_path()
+
+        if not path or not os.path.isfile(path):
+            raise clipboard.ClipboardError(
+                "The clipboard points at something that is not a plain file:\n"
+                f"  {path}"
+            )
+
+        with open(path, "rb") as handle:
+            return "file", os.path.basename(path), handle.read(), None
+
+    image = clipboard.image_type(offered)
+
+    if image:
+        extension = image.removeprefix("image/")
+
+        return (
+            "image",
+            share.stamp(extension),
+            clipboard.read(image, binary=True),
+            image,
+        )
+
+    text = clipboard.text_type(offered)
+
+    if not text:
+        raise clipboard.ClipboardError(
+            "The clipboard holds nothing this can carry.\n"
+            f"It offers: {' '.join(offered)}"
+        )
+
+    return "text", "clip.txt", clipboard.read(text, binary=True), None
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

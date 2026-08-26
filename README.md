@@ -20,6 +20,7 @@ wget -qO - https://raw.githubusercontent.com/alxmagro/nikit/main/get.sh | bash -
   - `Alt+Tab` walks windows instead of applications;
 - Scripts:
   - `u-copy` / `u-paste`: carry the clipboard, a file or a stream to another machine, encrypted end to end;
+  - `nikit app-folders`: store and sync the folders in your App Grid;
   - `nikit gnome-extensions`: store and sync your GNOME extensions and their settings;
   - `gistpad`: named notes kept as secret gists;
   - `goto`: jump to named folders from anywhere;

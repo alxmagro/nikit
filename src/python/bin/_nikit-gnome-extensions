@@ -1,0 +1,553 @@
+#!/usr/bin/env python3
+"""GNOME extensions kept in a gist: which ones to install, and how each one is
+configured. One file per extension, so saving one leaves the rest alone."""
+
+import json
+import os
+import re
+import subprocess
+import sys
+from glob import glob
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), os.pardir))
+
+from lib import editor, gist, pick, settings  # noqa: E402
+
+DESCRIPTION = "nikit.gnome-extensions"
+MANIFEST = "_gnome-extensions.list"
+BASE = "/org/gnome/shell/extensions/"
+SHELL_SCHEMA = "org.gnome.shell"
+ENABLED = "enabled-extensions"
+EXT_DIR = os.path.expanduser("~/.local/share/gnome-shell/extensions")
+
+USAGE = """Usage: nikit gnome-extensions <subcommand>
+
+Subcommands:
+  sync               Send this machine's settings for the ones you mark
+  edit               Change what is stored, without reading this machine
+  restore            Install and configure them on this machine
+  reset              Strip this machine back to a stock GNOME
+  cleanup            Forget extensions that are enabled but not installed
+  show [--config]    Print the stored list, or the stored settings"""
+
+
+def main(argv):
+    if not os.environ.get("DBUS_SESSION_BUS_ADDRESS"):
+        print(
+            "No desktop session: dconf and gnome-extensions need one.",
+            file=sys.stderr,
+        )
+        return 1
+
+    try:
+        gist.ready()
+    except gist.GistError as error:
+        print(error, file=sys.stderr)
+        return 1
+
+    command = argv[0] if argv else ""
+
+    try:
+        if command == "sync":
+            return cmd_sync()
+        if command == "edit":
+            return cmd_edit()
+        if command == "restore":
+            return cmd_restore()
+        if command == "reset":
+            return cmd_reset()
+        if command == "cleanup":
+            return cmd_cleanup()
+        if command == "show":
+            return cmd_show(argv[1:])
+    except gist.GistError as error:
+        print(error, file=sys.stderr)
+        return 1
+
+    print(USAGE, file=sys.stderr)
+
+    return 1
+
+
+def cmd_sync():
+    """Push this machine's settings for the extensions you mark. What is left
+    unmarked keeps the stored copy, trimming and all."""
+    gist_id = gist.find(DESCRIPTION)
+    contents = gist.files(gist_id) if gist_id else {}
+    existing = contents.get(MANIFEST, "")
+
+    picked = _choose(_active(), [])
+
+    if not picked:
+        return 1
+
+    manifest = _manifest_union(existing, picked)
+
+    if not gist_id:
+        url = gist.create(DESCRIPTION, MANIFEST, manifest)
+        gist_id = url.rsplit("/", 1)[-1]
+        print(f"Created at {url}")
+
+    stored = _stored_sections(contents)
+
+    _commit(
+        gist_id, contents, manifest,
+        _buffer_for(_manifest_uuids(manifest), stored, set(picked)),
+    )
+
+    return 0
+
+
+def cmd_edit():
+    """Correct what is stored, without touching this machine. Unmarking
+    removes."""
+    gist_id = gist.find(DESCRIPTION)
+
+    if not gist_id:
+        _missing()
+        return 1
+
+    contents = gist.files(gist_id)
+    existing = contents.get(MANIFEST, "")
+    stored = _stored_sections(contents)
+    listed = _manifest_uuids(existing)
+
+    picked = _choose(listed, listed)
+
+    if not picked:
+        return 1
+
+    _commit(
+        gist_id, contents, _manifest_merge(existing, picked),
+        _buffer_for(picked, stored, set()),
+    )
+
+    return 0
+
+
+def cmd_restore():
+    gist_id = gist.find(DESCRIPTION)
+
+    if not gist_id:
+        _missing()
+        return 1
+
+    contents = gist.files(gist_id)
+
+    if MANIFEST not in contents:
+        print(f"The gist has no {MANIFEST}.", file=sys.stderr)
+        return 1
+
+    here = set(_installed())
+    turned_on, failed, refused = [], [], []
+    added = 0
+
+    for uuid in _manifest_uuids(contents[MANIFEST]):
+        if uuid not in here:
+            print(f"Installing {uuid}...")
+            outcome = _install_from_site(uuid)
+
+            if outcome == "installed":
+                added += 1
+            elif outcome == "cancelled":
+                refused.append(uuid)
+                continue
+            else:
+                failed.append(uuid)
+                continue
+
+        turned_on.append(uuid)
+
+        if f"{uuid}.dconf" in contents:
+            settings.load(BASE, contents[f"{uuid}.dconf"])
+
+    if turned_on:
+        _enable(turned_on)
+
+    version = _shell_version()
+
+    if failed:
+        print()
+        print("The shell could not install these, most likely because they are")
+        print(f"not published for GNOME {version}:")
+        for uuid in failed:
+            print(f"  {uuid}")
+
+    if refused:
+        print()
+        print("Declined at the prompt:")
+        for uuid in refused:
+            print(f"  {uuid}")
+
+    print()
+    print(f"Done. Installed {added}, enabled {len(turned_on)}.")
+
+    return 0
+
+
+def cmd_reset():
+    """Puts the machine back to a stock GNOME, so a restore can be tested for
+    real. Nothing here touches the gist."""
+    here = _installed()
+
+    print("This removes, for your user:")
+    print(f"  every extension installed under {EXT_DIR}")
+    print("  the list of enabled extensions")
+    print(f"  every extension setting under {BASE}")
+    print()
+
+    if here:
+        for uuid in here:
+            print(f"  {uuid}")
+    else:
+        print("  (nothing is installed)")
+
+    print()
+
+    if _ask("Type 'reset' to go ahead: ") != "reset":
+        return 1
+
+    for uuid in here:
+        subprocess.run(
+            ["gnome-extensions", "uninstall", uuid], capture_output=True
+        )
+
+    settings.reset(SHELL_SCHEMA, ENABLED)
+    settings.reset_tree(BASE)
+
+    for path in glob(os.path.join(EXT_DIR, "*")):
+        subprocess.run(["rm", "-rf", path])
+
+    print("Reset. Log out and back in.")
+
+    return 0
+
+
+def cmd_cleanup():
+    """GNOME never takes a uuid out of enabled-extensions, so the key collects
+    the name of every extension ever tried. Anything in it that is not on disk
+    is dead weight; an installed extension that is merely switched off is not
+    in the key at all, so the two never get confused."""
+    here = set(_installed())
+    key = settings.get_list(SHELL_SCHEMA, ENABLED)
+    ghosts = sorted({uuid for uuid in key if uuid not in here})
+
+    if not ghosts:
+        print("Nothing to clean up.")
+        return 0
+
+    for uuid in ghosts:
+        print(f"  {uuid}")
+    print()
+
+    if not _confirm(f"Drop these {len(ghosts)} from the enabled list? (y/N) "):
+        return 1
+
+    settings.set_list(SHELL_SCHEMA, ENABLED, [u for u in key if u in here])
+    print("Cleaned.")
+
+    return 0
+
+
+def cmd_show(argv):
+    gist_id = gist.find(DESCRIPTION)
+
+    if not gist_id:
+        _missing()
+        return 1
+
+    contents = gist.files(gist_id)
+
+    if "--config" not in argv:
+        # rstrip then print: what comes back from the gist may or may not end
+        # in a newline, and the terminal wants exactly one either way.
+        print(contents.get(MANIFEST, "").rstrip("\n"))
+        return 0
+
+    # Same shape the editor shows during an edit, so the two read alike.
+    for uuid, body in _stored_sections(contents).items():
+        print(f"## {uuid}")
+        print(body)
+        print()
+
+    return 0
+
+
+def _installed():
+    result = subprocess.run(
+        ["gnome-extensions", "list"], capture_output=True, text=True
+    )
+
+    return [line for line in result.stdout.splitlines() if line]
+
+
+def _active():
+    """The enabled-extensions key keeps the uuid of everything ever tried, so
+    it only means something intersected with what is actually on disk."""
+    enabled = set(settings.get_list(SHELL_SCHEMA, ENABLED))
+
+    return sorted(uuid for uuid in _installed() if uuid in enabled)
+
+
+def _schema_path(uuid):
+    """Settings live under the extension's schema id, which is not the uuid:
+    rounded-window-corners@fxgn writes to rounded-window-corners-reborn. The id
+    comes from metadata.json when it declares one, and from the installed
+    schema when it does not. Guessing from the uuid would quietly save the
+    wrong subtree, so an extension without either simply has no settings.
+    """
+    directory = os.path.join(EXT_DIR, uuid)
+    schema = None
+
+    try:
+        with open(os.path.join(directory, "metadata.json")) as handle:
+            schema = json.load(handle).get("settings-schema")
+    except (OSError, ValueError):
+        pass
+
+    if not schema:
+        for path in glob(os.path.join(directory, "schemas", "*.gschema.xml")):
+            with open(path) as handle:
+                found = re.search(
+                    r'id="(org\.gnome\.shell\.extensions\.[^"]*)"', handle.read()
+                )
+
+            if found:
+                schema = found.group(1)
+                break
+
+    prefix = "org.gnome.shell.extensions."
+
+    if not schema or not schema.startswith(prefix):
+        return None
+
+    return schema[len(prefix):].replace(".", "/")
+
+
+def _dump(uuid):
+    """dconf dump anchors its sections at [/]. Re-anchor them under the
+    extension's own subpath so the result loads back into the extensions
+    root."""
+    relative = _schema_path(uuid)
+
+    if not relative:
+        return ""
+
+    body = settings.dump(f"{BASE}{relative}/")
+
+    if not body.strip():
+        return ""
+
+    lines = []
+
+    for line in body.splitlines():
+        if line == "[/]":
+            lines.append(f"[{relative}]")
+        elif line.startswith("["):
+            lines.append(f"[{relative}/{line[1:]}")
+        else:
+            lines.append(line)
+
+    return "\n".join(lines)
+
+
+def _manifest_uuids(manifest):
+    return [line.split()[0] for line in manifest.splitlines() if line.strip()]
+
+
+def _manifest_merge(existing, picked):
+    """What was marked becomes the manifest. A line that was already there
+    comes back verbatim, so anything you added to it by hand survives."""
+    kept = {line.split()[0]: line for line in existing.splitlines() if line.strip()}
+
+    return "\n".join(kept.get(uuid, uuid) for uuid in picked)
+
+
+def _manifest_union(existing, picked):
+    """Adds what was marked, keeping the lines already there untouched."""
+    lines, seen = [], set()
+
+    for line in [*existing.splitlines(), *picked]:
+        if not line.strip():
+            continue
+
+        uuid = line.split()[0]
+
+        if uuid not in seen:
+            seen.add(uuid)
+            lines.append(line)
+
+    return "\n".join(lines)
+
+
+def _sections(buffer):
+    """The buffer, split back apart by its marker line. dconf reads '#' as a
+    comment, so the markers survive a round trip."""
+    out, current = {}, None
+
+    for line in buffer.splitlines():
+        if line.startswith("## "):
+            current = line[3:].strip()
+            out[current] = []
+        elif current:
+            out[current].append(line)
+
+    return {uuid: "\n".join(body).strip("\n") for uuid, body in out.items()}
+
+
+def _buffer_for(uuids, stored, fresh):
+    """Every extension in one buffer.
+
+    `fresh` says which of them come from this machine instead of from the
+    stored copy. That is what makes a partial sync possible: an extension left
+    out keeps what was stored, trimming included.
+    """
+    parts = []
+
+    for uuid in uuids:
+        body = _dump(uuid) if uuid in fresh else stored.get(uuid, "")
+
+        if body:
+            parts.append(f"## {uuid}\n{body}\n")
+
+    return "\n".join(parts)
+
+
+def _stored_sections(contents):
+    """Every stored section, keyed by uuid.
+
+    Takes what was already fetched rather than fetching again: the caller
+    needs the manifest out of the same request anyway, and a round trip to
+    GitHub costs more than everything else here put together.
+    """
+    return {
+        uuid: contents[f"{uuid}.dconf"].strip("\n")
+        for uuid in _manifest_uuids(contents.get(MANIFEST, ""))
+        if f"{uuid}.dconf" in contents
+    }
+
+
+def _commit(gist_id, contents, manifest, buffer):
+    """Opens the buffer, then writes back only what differs from what the gist
+    already holds."""
+    existing = contents.get(MANIFEST, "")
+    stored = _stored_sections(contents)
+    after = buffer
+
+    # An extension can be listed and have nothing to configure, and then there
+    # is no editor to open.
+    if buffer:
+        after, _ = editor.open_buffer(buffer, "extensions.dconf")
+
+    kept = _manifest_uuids(manifest)
+    incoming = _sections(after)
+    touched = False
+
+    if manifest != existing:
+        gist.write(gist_id, MANIFEST, manifest)
+        touched = True
+
+    for uuid in kept:
+        body = incoming.get(uuid)
+
+        if body and body != stored.get(uuid):
+            gist.write(gist_id, f"{uuid}.dconf", body)
+            touched = True
+
+    for uuid in _manifest_uuids(existing):
+        if uuid not in kept:
+            gist.remove(gist_id, f"{uuid}.dconf")
+            touched = True
+
+    print("Saved." if touched else "Nothing changed.")
+
+
+def _choose(choices, marked):
+    if not choices:
+        print("No extension is both installed and enabled.", file=sys.stderr)
+        return None
+
+    if not pick.ready():
+        print("fzf is needed to choose which extensions to mark.", file=sys.stderr)
+        return None
+
+    return pick.many(
+        choices, "tab mark · ctrl-a all · enter confirm · ctrl-c exit", marked
+    )
+
+
+def _missing():
+    print("Nothing stored yet.", file=sys.stderr)
+    print("Run 'nikit gnome-extensions sync' first.", file=sys.stderr)
+
+
+def _install_from_site(uuid):
+    """The shell downloads, unpacks and loads the extension itself, which is
+    the path the Extensions app takes. It asks before each one, and that is the
+    point: nothing lands without you seeing it."""
+    result = subprocess.run(
+        [
+            "gdbus", "call", "--session",
+            "--dest", "org.gnome.Shell",
+            "--object-path", "/org/gnome/Shell",
+            "--method", "org.gnome.Shell.Extensions.InstallRemoteExtension",
+            uuid,
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        return "failed"
+
+    if "successful" in result.stdout:
+        return "installed"
+
+    return "cancelled" if "cancelled" in result.stdout else "failed"
+
+
+def _enable(uuids):
+    """`gnome-extensions enable` is ignored for an extension the running shell
+    has not loaded yet, which is every one just installed. Writing the key
+    directly works now and survives the logout."""
+    current = settings.get_list(SHELL_SCHEMA, ENABLED)
+    merged = list(dict.fromkeys([*current, *uuids]))
+
+    settings.set_list(SHELL_SCHEMA, ENABLED, merged)
+
+
+def _shell_version():
+    result = subprocess.run(
+        ["gnome-shell", "--version"], capture_output=True, text=True
+    )
+
+    return result.stdout.split()[2].split(".")[0] if result.stdout else "?"
+
+
+def _ask(prompt):
+    # Two handles rather than one in "r+": a tty cannot be seeked, and
+    # Python's buffered read-write mode insists on it.
+    with open("/dev/tty", "w") as out, open("/dev/tty") as incoming:
+        out.write(prompt)
+        out.flush()
+
+        return incoming.readline().strip()
+
+
+def _confirm(prompt):
+    return _ask(prompt).lower() in ("y", "yes")
+
+
+USAGE = """Usage: nikit gnome-extensions <subcommand>
+
+Subcommands:
+  sync               Send this machine's settings for the ones you mark
+  edit               Change what is stored, without reading this machine
+  restore            Install and configure them on this machine
+  reset              Strip this machine back to a stock GNOME
+  cleanup            Forget extensions that are enabled but not installed
+  show [--config]    Print the stored list, or the stored settings"""
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

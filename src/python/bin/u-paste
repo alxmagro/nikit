@@ -1,0 +1,169 @@
+#!/usr/bin/env python3
+"""u-paste - Receive what another machine sent.
+
+    u-paste             Put it back on the clipboard
+    u-paste file        Write it there, asking before replacing
+    u-paste -           Write it to stdout
+
+Text goes back on the clipboard as text and an image as an image, so Ctrl+V
+lands the same thing that was copied. A file has to exist on disk before the
+clipboard can point at it, so it is written to an inbox first.
+"""
+
+import argparse
+import os
+import shutil
+import sys
+import time
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), os.pardir))
+
+from lib import clipboard, share  # noqa: E402
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(
+        prog="u-paste", description="Receive what another machine sent."
+    )
+    parser.add_argument("file", nargs="?", help="a file, or - for stdout")
+    parser.add_argument(
+        "-k", "--keep", action="store_true", help="leave it stored"
+    )
+    parser.add_argument(
+        "-f", "--force", action="store_true", help="replace without asking"
+    )
+
+    args = parser.parse_args(argv)
+
+    try:
+        share.ready()
+
+        gist_id = share.find()
+
+        if not gist_id:
+            print("Nothing stored.", file=sys.stderr)
+            print("Run 'u-copy' on the other machine first.", file=sys.stderr)
+            return 1
+
+        kind, name, data, mime = share.take(gist_id)
+
+        if not deliver(kind, name, data, mime, args.file, args.force):
+            return 1
+    except (share.ShareError, clipboard.ClipboardError) as error:
+        print(error, file=sys.stderr)
+        return 1
+
+    if not args.keep:
+        share.drop(gist_id)
+
+    return 0
+
+
+def deliver(kind, name, data, mime, dest, force):
+    if dest == "-":
+        return _to_stdout(kind, data, force)
+
+    if dest:
+        return _to_file(kind, name, data, dest, force)
+
+    return _to_clipboard(kind, name, data, mime, force)
+
+
+def _to_stdout(kind, data, force):
+    # Refusing beats scrambling the terminal, and refusing before the gist is
+    # dropped means the command can simply be run again.
+    if kind != "text" and sys.stdout.isatty() and not force:
+        print("Binary output can mess up your terminal.", file=sys.stderr)
+        print(
+            "Redirect it to a file or a pipe, or pass -f to write it here anyway.",
+            file=sys.stderr,
+        )
+        return False
+
+    sys.stdout.buffer.write(data)
+
+    # A prompt landing mid-text is only worth avoiding when a person is reading.
+    if kind == "text" and sys.stdout.isatty() and data and not data.endswith(b"\n"):
+        sys.stdout.buffer.write(b"\n")
+
+    return True
+
+
+def _to_file(kind, name, data, dest, force):
+    # A directory means "put it here under its own name", like cp does.
+    if os.path.isdir(dest):
+        dest = os.path.join(dest, name)
+
+    if not _may_write(dest, force):
+        return False
+
+    with open(dest, "wb") as handle:
+        handle.write(data)
+
+    print(f"Wrote {dest}.")
+
+    return True
+
+
+def _to_clipboard(kind, name, data, mime, force):
+    clipboard.ready()
+
+    if kind == "text":
+        clipboard.write(data)
+        print("Text is on the clipboard.")
+        return True
+
+    if kind == "image":
+        clipboard.write(data, mime or "image/png")
+        print("Image is on the clipboard.")
+        return True
+
+    # The file manager pastes paths, not bytes, so the file has to exist
+    # somewhere before the clipboard can point at it.
+    #
+    # The inbox holds one arrival at a time. Whatever is still here was never
+    # pasted, since pasting moves it out, so it is safe to drop and the folder
+    # cannot grow. No prompt: this is scratch space, not a destination the
+    # caller chose.
+    os.makedirs(share.INBOX, exist_ok=True)
+
+    for entry in os.listdir(share.INBOX):
+        path = os.path.join(share.INBOX, entry)
+        shutil.rmtree(path) if os.path.isdir(path) else os.unlink(path)
+
+    path = os.path.join(share.INBOX, name)
+
+    with open(path, "wb") as handle:
+        handle.write(data)
+
+    clipboard.offer_file(path, move=True)
+    print(f"Saved {path}, and it is on the clipboard to be moved on paste.")
+
+    return True
+
+
+def _may_write(path, force):
+    """The file manager shows a dialog here; a terminal gets the same
+    question."""
+    if not os.path.exists(path) or force:
+        return True
+
+    if not sys.stdin.isatty():
+        print(f"{path} already exists. Pass -f to replace it.", file=sys.stderr)
+        return False
+
+    stat = os.stat(path)
+    when = time.strftime("%b %d %H:%M", time.localtime(stat.st_mtime))
+
+    answer = input(f"{path} already exists ({stat.st_size} bytes, {when}).\nReplace? [y/N] ")
+
+    if answer.strip().lower() in ("y", "yes"):
+        return True
+
+    print("Kept.", file=sys.stderr)
+
+    return False
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

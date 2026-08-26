@@ -1,0 +1,310 @@
+#!/usr/bin/env python3
+"""gistpad - Keep named notes as secret gists.
+
+    gistpad [-e <editor>]   Pick a note from the list and open it
+    gistpad sync            Rebuild the list from the gists on GitHub
+
+In the picker: enter opens, f2 renames, ctrl-d deletes, and the first entry
+starts a new note. The note name doubles as the file name, so ending it in an
+extension is what decides how GitHub and the editor highlight it.
+"""
+
+import argparse
+import os
+import subprocess
+import sys
+import tempfile
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), os.pardir))
+
+from lib import gist, pick  # noqa: E402
+
+PREFIX = "gistpad: "
+NEW_LABEL = "New gist..."
+DEFAULT_EDITOR = "nano"
+CACHE = os.path.join(
+    os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache")), "nikit"
+)
+INDEX = os.path.join(CACHE, "gistpad.tsv")
+
+
+def main(argv):
+    # argparse writes its own complaint to stderr before raising; this file
+    # prints one usage line and nothing else.
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.error = lambda message: (_ for _ in ()).throw(SystemExit(2))
+    parser.add_argument("-e", "--editor", default=DEFAULT_EDITOR)
+    parser.add_argument("action", nargs="?")
+
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit:
+        print("Usage: gistpad [-e <editor>] | gistpad sync", file=sys.stderr)
+        return 1
+
+    if args.action not in (None, "sync"):
+        print("Usage: gistpad [-e <editor>] | gistpad sync", file=sys.stderr)
+        return 1
+
+    try:
+        gist.ready()
+
+        if args.action == "sync":
+            return cmd_sync()
+
+        return cmd_open(args.editor)
+    except gist.GistError as error:
+        print(error, file=sys.stderr)
+        return 1
+
+
+def cmd_sync():
+    """Rebuilds the index from what GitHub actually holds."""
+    notes = {}
+
+    for line in _gh_list():
+        gist_id, description = line[0], line[1]
+
+        if description.startswith(PREFIX):
+            notes[description[len(PREFIX):]] = gist_id
+
+    _write_index(notes)
+    print(f"Synced {len(notes)} notes.", file=sys.stderr)
+
+    return 0
+
+
+def cmd_open(editor):
+    if not pick.ready():
+        print("Pick a note by name:", file=sys.stderr)
+        for key in _index():
+            print(key, file=sys.stderr)
+        return 1
+
+    pressed, key = pick.keys(
+        [NEW_LABEL, *_index()],
+        "enter open · f2 rename · ctrl-d delete · ctrl-c exit",
+        "ctrl-d,f2",
+    )
+
+    if key is None:
+        return 1
+
+    # The first entry is a label, not a note: rename and delete have nothing to
+    # act on there, so they do nothing at all.
+    if key == NEW_LABEL:
+        key = None
+
+    if pressed in ("ctrl-d", "f2"):
+        return _act(pressed, key)
+
+    return _edit(key, editor) if key else _create(editor)
+
+
+def _act(pressed, key):
+    if not key:
+        return 0
+
+    gist_id = _index().get(key)
+
+    if not gist_id:
+        print(f"No note named '{key}'", file=sys.stderr)
+        return 1
+
+    if pressed == "ctrl-d":
+        return _remove(key, gist_id, f"Delete note '{key}'?")
+
+    return _rename(key, gist_id)
+
+
+def _edit(key, editor):
+    gist_id = _index()[key]
+    contents = gist.files(gist_id)
+    filename = next(iter(contents))
+
+    # The scratch file carries the gist's own name, so the editor highlights it
+    # the same way GitHub does.
+    with tempfile.TemporaryDirectory(dir=_scratch()) as directory:
+        path = os.path.join(directory, filename)
+
+        with open(path, "w") as handle:
+            handle.write(contents[filename])
+
+        before = _read(path)
+        subprocess.run([editor, path])
+        after = _read(path)
+
+    if after == before:
+        return 0
+
+    if not after.strip():
+        return _remove(key, gist_id)
+
+    gist.write(gist_id, filename, after)
+    print(f"Saved note '{key}'")
+
+    return 0
+
+
+def _create(editor):
+    """A new note has no name yet, so it is named after the editor closes."""
+    with tempfile.TemporaryDirectory(dir=_scratch()) as directory:
+        path = os.path.join(directory, "note")
+        open(path, "w").close()
+
+        subprocess.run([editor, path])
+        body = _read(path)
+
+    if not body.strip():
+        print("Nothing written, note not created.", file=sys.stderr)
+        return 1
+
+    wanted = _ask("Name: ")
+
+    if not wanted:
+        print("Nothing named, note not created.", file=sys.stderr)
+        return 1
+
+    key = _unique(wanted)
+
+    if key != wanted:
+        print(f"A note named '{wanted}' already exists, using '{key}'.", file=sys.stderr)
+
+    url = gist.create(PREFIX + key, _filename(key), body)
+
+    _set(key, url.rsplit("/", 1)[-1])
+    print(f"Created at {url}")
+
+    return 0
+
+
+def _remove(key, gist_id, prompt=None):
+    if prompt and not _confirm(f"{prompt} (y/N) "):
+        return 1
+
+    gist.delete(gist_id)
+
+    _unset(key)
+    print(f"Removed note '{key}'")
+
+    return 0
+
+
+def _rename(key, gist_id):
+    """Renaming touches three things: the file, the description GitHub shows,
+    and the local index."""
+    wanted = _ask(f"Rename '{key}' to: ")
+
+    if not wanted:
+        return 1
+
+    if wanted == key:
+        return 0
+
+    new_key = _unique(wanted)
+    filename = next(iter(gist.files(gist_id)))
+
+    gist.rename(gist_id, filename, _filename(new_key))
+    gist.describe(gist_id, PREFIX + new_key)
+
+    _unset(key)
+    _set(new_key, gist_id)
+    print(f"Renamed note '{key}' to '{new_key}'")
+
+    return 0
+
+
+def _filename(key):
+    """The note name doubles as the file name, so the extension is whatever you
+    typed. Without one, markdown, which is what a note usually is."""
+    return f"gistpad-{key}" if "." in key else f"gistpad-{key}.md"
+
+
+def _unique(key):
+    candidate, n = key, 1
+    index = _index()
+
+    while candidate in index:
+        n += 1
+        candidate = f"{key} - {n}"
+
+    return candidate
+
+
+def _index():
+    """The note names, in the order the index holds them."""
+    notes = {}
+
+    try:
+        with open(INDEX) as handle:
+            for line in handle:
+                if "\t" in line:
+                    key, gist_id = line.rstrip("\n").split("\t", 1)
+                    notes[key] = gist_id
+    except OSError:
+        pass
+
+    return notes
+
+
+def _write_index(notes):
+    os.makedirs(CACHE, exist_ok=True)
+
+    with open(INDEX + ".tmp", "w") as handle:
+        for key, gist_id in notes.items():
+            handle.write(f"{key}\t{gist_id}\n")
+
+    os.replace(INDEX + ".tmp", INDEX)
+
+
+def _set(key, gist_id):
+    notes = _index()
+    notes[key] = gist_id
+    _write_index(notes)
+
+
+def _unset(key):
+    notes = _index()
+    notes.pop(key, None)
+    _write_index(notes)
+
+
+def _gh_list():
+    return [
+        line.split("\t")
+        for line in subprocess.run(
+            ["gh", "gist", "list", "--limit", "100"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.splitlines()
+        if "\t" in line
+    ]
+
+
+def _scratch():
+    os.makedirs(CACHE, exist_ok=True)
+    return CACHE
+
+
+def _read(path):
+    with open(path) as handle:
+        return handle.read().rstrip("\n")
+
+
+def _ask(prompt):
+    # Two handles rather than one in "r+": a tty cannot be seeked, and
+    # Python's buffered read-write mode insists on it.
+    with open("/dev/tty", "w") as out, open("/dev/tty") as incoming:
+        out.write(prompt)
+        out.flush()
+
+        return incoming.readline().strip()
+
+
+def _confirm(prompt):
+    return _ask(prompt).lower() in ("y", "yes")
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

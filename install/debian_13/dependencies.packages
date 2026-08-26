@@ -3,14 +3,11 @@ curl
 wget
 gnupg2
 
-# Reads and writes the Wayland clipboard, for u-share
+# Reads and writes the Wayland clipboard, for u-copy and u-paste
 wl-clipboard
 
 # Renders the QR code printed by the lanip function
 qrencode
-
-# Builds the JSON body gistpad sends to the gists API
-jq
 
 # GitHub CLI, used for auth and gists
 gh
@@ -18,5 +15,8 @@ gh
 # The picker behind gistpad
 fzf
 
-# Encrypts what u-share carries, to the SSH keys on the GitHub account
+# Encrypts what u-copy sends, to the SSH keys on the GitHub account
 age
+
+# Reads GNOME settings as typed values, for the nikit commands
+python3-gi
