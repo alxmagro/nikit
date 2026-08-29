@@ -8,8 +8,6 @@ source "$_root/shell/lanip.sh"
 source "$_root/shell/nikit.sh"
 source "$_root/shell/open.sh"
 
-# bin/ holds what the install generates rather than copies, so it survives
-# python/ being wiped and re-copied.
-export PATH="$PATH:$_root/python/bin:$_root/bin"
+export PATH="$PATH:$_root/python/bin"
 
 unset _root

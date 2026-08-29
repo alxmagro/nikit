@@ -9,7 +9,6 @@ wget -qO - https://raw.githubusercontent.com/alxmagro/nikit/main/get.sh | bash -
 **What it do?**
 
 - **scripts**:
-  - Wrappers for the Claude, Codex, Copilot and Gemini CLIs, kept up to date through mise;
   - `u-copy` / `u-paste`: carry the clipboard, a file or a stream to another machine, encrypted end to end;
   - `nikit app-folders`: store and sync the folders in your App Grid;
   - `nikit gnome-extensions`: store and sync your GNOME extensions and their settings;
