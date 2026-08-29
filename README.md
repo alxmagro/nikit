@@ -26,11 +26,11 @@ wget -qO - https://raw.githubusercontent.com/alxmagro/nikit/main/get.sh | bash -
   - Installed and activated in your shell;
 - **git**:
   - Installs gh and configures git globals;
-- **bash_aliases**:
+- **aliases**:
   - Adds custom aliases;
 - **nano**:
   - Modern bindings enabled by default (`Ctrl+C`, `Ctrl+V`, `Ctrl+X`, `Ctrl+Z`, ...);
-- **gnome_keybindings**:
+- **keybindings**:
   - `Super` + arrows drive workspaces and window state;
   - `Super` + `Alt` + arrows carry the window along;
   - `Alt+Tab` walks windows instead of applications;
