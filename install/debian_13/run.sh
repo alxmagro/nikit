@@ -13,7 +13,6 @@ run install/debian_13/modules/scripts.sh
 run install/debian_13/modules/docker.sh
 run install/debian_13/modules/postgresql.sh
 run install/debian_13/modules/mise.sh
-run install/debian_13/modules/mise_ai_agents.sh
 run install/debian_13/modules/git.sh
 run install/debian_13/modules/bash_aliases.sh
 run install/debian_13/modules/nano.sh
