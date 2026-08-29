@@ -34,5 +34,6 @@ wget -qO - https://raw.githubusercontent.com/alxmagro/nikit/main/get.sh | bash -
   - `Super` + arrows drive workspaces and window state;
   - `Super` + `Alt` + arrows carry the window along;
   - `Alt+Tab` walks windows instead of applications;
+  - `Super` + `R` opens a terminal (`kgx`);
 - **fonts**:
   - Installs Inter, Open Sans and Roboto Mono;

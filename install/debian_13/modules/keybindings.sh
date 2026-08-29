@@ -39,3 +39,15 @@ dconf load /org/gnome/mutter/keybindings/ << 'EOF'
 toggle-tiled-left=@as []
 toggle-tiled-right=@as []
 EOF
+
+# A custom shortcut is a two-step affair: the plugin holds a list of paths,
+# and each path holds one name/command/binding triple.
+dconf load /org/gnome/settings-daemon/plugins/media-keys/ << 'EOF'
+[/]
+custom-keybindings=['/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/console/']
+
+[custom-keybindings/console]
+name='Console'
+command='kgx'
+binding='<Super>r'
+EOF
