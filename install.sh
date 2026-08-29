@@ -41,7 +41,10 @@ modules() {
 }
 
 if [ $# -eq 0 ]; then
-  echo "Usage: ./install.sh <os> [script...]"
+  echo "Usage: ./install.sh <os> [module...]"
+  echo
+  echo "  ./install.sh debian_13                 Run everything for one OS"
+  echo "  ./install.sh debian_13 scripts docker  Run only the modules named"
   echo
   echo "Supported systems:"
   systems | while read -r os; do
