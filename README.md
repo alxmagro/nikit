@@ -23,7 +23,7 @@ wget -qO - https://raw.githubusercontent.com/alxmagro/nikit/main/get.sh | bash -
   - `nikit app-folders`: store and sync the folders in your App Grid;
   - `nikit gnome-extensions`: store and sync your GNOME extensions and their settings;
   - `gistpad`: named notes kept as secret gists;
-  - `goto`: jump to named folders from anywhere;
+  - `goto`: jump into named roots and drill into them from anywhere;
   - `lanip`: your LAN URL, with a QR code to open it on your phone;
   - `compress` / `decompress`: tar.gz in one word, twelve formats out;
   - `open`: xdg-open, quiet and detached;

@@ -3,190 +3,296 @@
 # goto - Jump to named target folders
 #
 # Usage:
-#   goto <name>                  Jump to a folder inside the target directory
-#   goto --add <name> <target>   Create a symlink inside the target directory
-#   goto --config <key>          Read a config value
-#   goto --config <key> <value>  Set a config value
+#   goto <key>[/<subpath>] [-r]  Jump there; -r also reveals it in the file manager
+#   goto                         List the configured roots
+#   goto --set <key> <path>      Create or update a root
+#   goto --rm <key>              Remove a root
+#   goto --config mode [-P|-L]   Get or set the cd mode (physical / logical)
 #   goto --help                  Show this help message
 #
-# Configuration lives in config/goto.conf, next to the other nikit files:
+# Configuration lives in config/goto.conf, next to the other nikit files.
+# One "namespace.key = value" per line; '#' starts a comment:
 #
-#   path   Base target directory, ~/Documents by default
-#   mode   '-P' or '-L', physical by default
+#   config.mode = -P
+#   paths.code  = /home/me/Documents/code
+#   paths.dots  = /home/me/.dotfiles
 #
-# The file is plain shell assignments. An environment variable still wins,
-# so GOTO_PATH=/tmp goto x works without touching the file.
+# GOTO_MODE in the environment still wins over config.mode.
 
 _goto_conf() {
   echo "${XDG_DATA_HOME:-$HOME/.local/share}/nikit/config/goto.conf"
 }
 
-_goto_var() {
-  case "$1" in
-    path) echo "GOTO_PATH" ;;
-    mode) echo "GOTO_MODE" ;;
-    *) return 1 ;;
-  esac
+# _goto_get <namespace.key> - print the raw value, or return 1 if absent.
+_goto_get() {
+  local want="$1" conf k v
+  conf=$(_goto_conf)
+  [ -f "$conf" ] || return 1
+
+  while IFS='=' read -r k v || [ -n "$k" ]; do
+    k="${k#"${k%%[![:space:]]*}"}"
+    k="${k%"${k##*[![:space:]]}"}"
+    [ "$k" = "$want" ] || continue
+
+    v="${v#"${v%%[![:space:]]*}"}"
+    v="${v%"${v##*[![:space:]]}"}"
+    printf '%s\n' "$v"
+    return 0
+  done < "$conf"
+
+  return 1
 }
 
-# Sets goto_path and goto_mode, which the caller declares local.
-#
-# The file is read in a subshell so it never leaks into the environment:
-# otherwise the first call would pin the values for the whole session, and
-# a later `goto --config` would have no effect until the next login.
-_goto_load() {
-  local conf values
+# _goto_lookup <key> - path for a navigation key (paths.<key>), or return 1.
+_goto_lookup() {
+  _goto_get "paths.$1"
+}
 
+# _goto_pairs - print "key<TAB>value" for every paths.* entry.
+_goto_pairs() {
+  local conf k v
   conf=$(_goto_conf)
+  [ -f "$conf" ] || return 0
 
-  if [ -f "$conf" ]; then
-    values=$(. "$conf" > /dev/null 2>&1; printf '%s\n%s\n' "${GOTO_PATH:-}" "${GOTO_MODE:-}")
-  fi
+  while IFS='=' read -r k v || [ -n "$k" ]; do
+    k="${k#"${k%%[![:space:]]*}"}"
+    k="${k%"${k##*[![:space:]]}"}"
 
-  goto_path="${GOTO_PATH:-$(printf '%s' "$values" | sed -n 1p)}"
-  goto_mode="${GOTO_MODE:-$(printf '%s' "$values" | sed -n 2p)}"
+    case "$k" in
+      paths.?*) ;;
+      *) continue ;;
+    esac
 
-  goto_path="${goto_path:-$HOME/Documents}"
-  goto_mode="${goto_mode:--P}"
+    v="${v#"${v%%[![:space:]]*}"}"
+    v="${v%"${v##*[![:space:]]}"}"
+    printf '%s\t%s\n' "${k#paths.}" "$v"
+  done < "$conf"
+}
+
+# _goto_put <namespace.key> <value> - atomically upsert one line, keeping the
+# rest of the file (comments and spacing included) untouched.
+_goto_put() {
+  local key="$1" value="$2" conf tmp k rest kk
+  conf=$(_goto_conf)
+  mkdir -p "$(dirname "$conf")"
+  tmp="$conf.tmp.$$"
+
+  {
+    if [ -f "$conf" ]; then
+      while IFS='=' read -r k rest || [ -n "$k" ]; do
+        kk="${k#"${k%%[![:space:]]*}"}"
+        kk="${kk%"${kk##*[![:space:]]}"}"
+        [ "$kk" = "$key" ] && continue
+
+        if [ -n "$rest" ]; then
+          printf '%s=%s\n' "$k" "$rest"
+        else
+          printf '%s\n' "$k"
+        fi
+      done < "$conf"
+    fi
+    printf '%s = %s\n' "$key" "$value"
+  } > "$tmp" && mv "$tmp" "$conf"
 }
 
 _goto_set() {
-  local key="$1" value="$2" var conf line
+  local key="$1" path="$2"
 
-  var=$(_goto_var "$key") || {
-    echo "Unknown key: $key (path, mode)" >&2
+  case "$key" in
+    "") echo "goto: empty key" >&2; return 1 ;;
+    -*) echo "goto: key cannot start with '-'" >&2; return 1 ;;
+    *[/=]* | *[[:space:]]*)
+      echo "goto: key cannot contain '/', '=' or spaces" >&2
+      return 1
+      ;;
+  esac
+
+  case "$path" in
+    "~") path="$HOME" ;;
+    "~/"*) path="$HOME/${path#\~/}" ;;
+    /*) ;;
+    *) path="$PWD/$path" ;;
+  esac
+  path="${path%/}"
+
+  _goto_put "paths.$key" "$path" && echo "Set $key -> $path"
+}
+
+_goto_rm() {
+  local key="$1" conf tmp k rest kk
+
+  _goto_lookup "$key" > /dev/null || {
+    echo "goto: no such root: $key" >&2
     return 1
   }
 
   conf=$(_goto_conf)
-  mkdir -p "$(dirname "$conf")"
+  tmp="$conf.tmp.$$"
 
-  line="$var=\"$value\""
+  while IFS='=' read -r k rest || [ -n "$k" ]; do
+    kk="${k#"${k%%[![:space:]]*}"}"
+    kk="${kk%"${kk##*[![:space:]]}"}"
+    [ "$kk" = "paths.$key" ] && continue
 
-  {
-    grep -v "^$var=" "$conf" 2> /dev/null
-    printf '%s\n' "$line"
-  } > "$conf.tmp" && mv "$conf.tmp" "$conf"
+    if [ -n "$rest" ]; then
+      printf '%s=%s\n' "$k" "$rest"
+    else
+      printf '%s\n' "$k"
+    fi
+  done < "$conf" > "$tmp" && mv "$tmp" "$conf"
 
-  echo "Set $key = $value"
+  echo "Removed $key"
+}
+
+_goto_mode() {
+  local m
+  m="${GOTO_MODE:-$(_goto_get config.mode)}"
+  printf '%s' "${m:--P}"
 }
 
 goto() {
-  local target goto_path goto_mode
+  local key rest root target listed reveal
 
-  if [ "$1" = "--help" ]; then
-    echo "goto - Jump to named target folders"
-    echo
-    echo "Usage:"
-    echo "  goto <name>                  Jump to a folder inside the target directory"
-    echo "  goto --add <name> <target>   Create a symlink inside the target directory"
-    echo "  goto --config <key>          Read a config value"
-    echo "  goto --config <key> <value>  Set a config value"
-    echo "  goto --help                  Show this help message"
-    echo
-    echo "Config keys:"
-    echo "  path   Base target directory, ~/Documents by default"
-    echo "  mode   '-P' or '-L', physical by default"
-    echo
-    echo "Stored in $(_goto_conf)"
-    return 0
-  fi
-
-  if [ "$1" = "--config" ]; then
-    if [ -z "${2:-}" ]; then
-      echo "Usage: goto --config <key> [value]"
-      return 1
-    fi
-
-    if [ -n "${3:-}" ]; then
+  case "${1:-}" in
+    --help)
+      echo "goto - Jump to named target folders"
+      echo
+      echo "Usage:"
+      echo "  goto <key>[/<subpath>] [-r]  Jump there; -r also reveals it in the file manager"
+      echo "  goto                         List the configured roots"
+      echo "  goto --set <key> <path>      Create or update a root"
+      echo "  goto --rm <key>              Remove a root"
+      echo "  goto --config mode [-P|-L]   Get or set the cd mode (physical / logical)"
+      echo "  goto --help                  Show this help message"
+      echo
+      echo "Config: $(_goto_conf)"
+      return 0
+      ;;
+    --set)
+      if [ -z "${2:-}" ] || [ -z "${3:-}" ]; then
+        echo "Usage: goto --set <key> <path>" >&2
+        return 1
+      fi
       _goto_set "$2" "$3"
       return
-    fi
+      ;;
+    --rm)
+      if [ -z "${2:-}" ]; then
+        echo "Usage: goto --rm <key>" >&2
+        return 1
+      fi
+      _goto_rm "$2"
+      return
+      ;;
+    --config)
+      case "${2:-}" in
+        mode)
+          if [ -n "${3:-}" ]; then
+            case "$3" in
+              -P | -L) ;;
+              *) echo "goto: mode must be -P or -L" >&2; return 1 ;;
+            esac
+            _goto_put config.mode "$3" && echo "Set mode = $3"
+          else
+            _goto_mode
+            echo
+          fi
+          ;;
+        *)
+          echo "goto: unknown config key '${2:-}' (mode)" >&2
+          return 1
+          ;;
+      esac
+      return
+      ;;
+  esac
 
-    local var
-    var=$(_goto_var "$2") || {
-      echo "Unknown key: $2 (path, mode)" >&2
-      return 1
-    }
-
-    local goto_path goto_mode
-    _goto_load
-
-    case "$2" in
-      path) echo "$goto_path" ;;
-      mode) echo "$goto_mode" ;;
-    esac
-
+  if [ -z "${1:-}" ]; then
+    listed=""
+    while IFS=$'\t' read -r key rest; do
+      listed=1
+      printf '%s -> %s\n' "$key" "$rest"
+    done < <(_goto_pairs)
+    [ -n "$listed" ] || echo "No roots configured. Use: goto --set <key> <path>"
     return 0
   fi
 
-  _goto_load
+  reveal=""
+  case "${2:-}" in
+    "") ;;
+    -r | --reveal) reveal=1 ;;
+    *) echo "goto: unknown option '$2'" >&2; return 1 ;;
+  esac
 
-  if [ "$1" = "--add" ]; then
-    if [ -z "${2:-}" ] || [ -z "${3:-}" ]; then
-      echo "Usage: goto --add [name] [target]"
-      return 1
-    fi
+  key="${1%%/*}"
+  case "$1" in
+    */*) rest="${1#*/}" ;;
+    *) rest="" ;;
+  esac
 
-    mkdir -p "$goto_path"
-    ln -sfn "$3" "$goto_path/$2"
-
-    echo "Created symlink:"
-    echo "  $2 -> $3"
-    return 0
-  fi
-
-  if [ -z "$1" ]; then
-    echo "Usage: goto <NAME>"
-    echo "Target directory: $goto_path"
+  root=$(_goto_lookup "$key") || {
+    echo "goto: unknown key '$key'" >&2
     return 1
-  fi
+  }
 
-  target="$goto_path/$1"
+  target="$root${rest:+/$rest}"
 
   if [ ! -d "$target" ]; then
-    echo "Target not found: $target"
+    echo "goto: not a directory: $target" >&2
     return 1
   fi
 
-  cd "$goto_mode" "$target" || return 1
+  cd "$(_goto_mode)" "$target" || return 1
+  [ -z "$reveal" ] || xdg-open .
 }
 
 _goto_complete() {
-  local arg cur
-
-  arg="${COMP_WORDS[1]}"
+  local first cur
+  COMPREPLY=()
+  first="${COMP_WORDS[1]}"
   cur="${COMP_WORDS[COMP_CWORD]}"
 
-  # Directory completion for the target of --add
-  if [ "$arg" = "--add" ] && [ "$COMP_CWORD" -eq 3 ]; then
-    local -a matches=()
+  # goto --set <TAB> / goto --rm <TAB>  ->  existing keys
+  if { [ "$first" = "--set" ] || [ "$first" = "--rm" ]; } && [ "$COMP_CWORD" -eq 2 ]; then
+    local IFS=$'\n'
+    COMPREPLY=($(compgen -W "$(_goto_pairs | cut -f1)" -- "$cur"))
+    return 0
+  fi
+
+  # goto --set <key> <TAB>  ->  directories for the target path.
+  # -o filenames lets readline add the trailing slash and skip the space.
+  if [ "$first" = "--set" ] && [ "$COMP_CWORD" -eq 3 ]; then
     local entry
+    while IFS= read -r entry; do
+      COMPREPLY+=("$entry")
+    done < <(compgen -d -- "$cur")
+    compopt -o filenames 2> /dev/null || true
+    return 0
+  fi
+
+  # any other flag: no completion
+  [[ "$first" == --* ]] && return 0
+  [ "$COMP_CWORD" -eq 1 ] || return 0
+
+  if [[ "$cur" == */* ]]; then
+    # Drill down inside the key's root. Mark the candidates as filenames so
+    # readline lists only the trailing segment, not the "<key>/..." we typed.
+    local key="${cur%%/*}" sub="${cur#*/}" root entry
+    root=$(_goto_lookup "$key") || return 0
+    root="${root%/}"
 
     while IFS= read -r entry; do
-      matches+=("$entry/")
-    done < <(compgen -d -- "$cur")
+      COMPREPLY+=("$key/${entry:${#root}+1}/")
+    done < <(compgen -d -- "$root/$sub")
 
-    COMPREPLY=("${matches[@]}")
-    compopt -o nospace 2> /dev/null || true
+    compopt -o nospace -o filenames 2> /dev/null || true
     return 0
   fi
 
-  if [ "$arg" = "--config" ] && [ "$COMP_CWORD" -eq 2 ]; then
-    COMPREPLY=($(compgen -W "path mode" -- "$cur"))
-    return 0
-  fi
-
-  if [[ "$arg" != --* ]] && [ "$COMP_CWORD" -eq 1 ]; then
-    local goto_path goto_mode
-    _goto_load
-    [ -d "$goto_path" ] || return 0
-
-    # Split candidates on newline only, so names with spaces survive
-    local IFS=$'\n'
-    COMPREPLY=($(compgen -W "$(ls -1A "$goto_path" 2> /dev/null)" -- "$cur"))
-    return 0
-  fi
+  # First word: the configured keys, as "key/" candidates
+  local IFS=$'\n'
+  COMPREPLY=($(compgen -W "$(_goto_pairs | cut -f1 | sed 's:$:/:')" -- "$cur"))
+  compopt -o nospace 2> /dev/null || true
 }
 
 complete -F _goto_complete goto
