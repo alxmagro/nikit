@@ -61,7 +61,7 @@ run() {
 # Read a package list, skipping comments and blank lines. Takes a path
 # relative to the repo root, without the extension:
 #
-#   packages install/debian_13/base
+#   packages install/debian_13/dependencies
 packages() {
   local file="$SH_ROOT/$1.packages"
 
