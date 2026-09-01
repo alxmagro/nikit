@@ -7,7 +7,7 @@
 #   ./install.sh debian_13                Run everything for one OS
 #   ./install.sh debian_13 scripts docker Run only the modules named
 
-set -e
+set -euo pipefail
 
 SH_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SH_INSTALL="$SH_ROOT/install"

@@ -19,8 +19,6 @@ trap 'rm -rf "$src"' EXIT
 echo "nikit  $repo@$ref"
 echo
 
-mkdir -p "$src"
-
 if command -v curl > /dev/null; then
   curl -fsSL "$url"
 else
