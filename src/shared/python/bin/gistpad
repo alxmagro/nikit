@@ -3,6 +3,8 @@
 
     gistpad [-e <editor>]   Pick a note from the list and open it
     gistpad sync            Rebuild the list from the gists on GitHub
+    ... | gistpad           Create a new note from stdin
+    gistpad < file          Same, reading the body from a file
 
 In the picker: enter opens, f2 renames, ctrl-d deletes, and the first entry
 starts a new note. The note name doubles as the file name, so ending it in an
@@ -51,6 +53,9 @@ def main(argv):
 
         if args.action == "sync":
             return cmd_sync()
+
+        if args.action is None and not sys.stdin.isatty():
+            return _finish_create(sys.stdin.read().rstrip("\n"))
 
         return cmd_open(args.editor)
     except gist.GistError as error:
@@ -155,6 +160,10 @@ def _create(editor):
         subprocess.run([editor, path])
         body = _read(path)
 
+    return _finish_create(body)
+
+
+def _finish_create(body):
     if not body.strip():
         print("Nothing written, note not created.", file=sys.stderr)
         return 1
