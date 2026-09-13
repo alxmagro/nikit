@@ -37,6 +37,13 @@ def keys(choices, header, expect):
     return lines[0], (lines[1] if len(lines) > 1 else None)
 
 
+def one(choices, header):
+    """Pick a single item, or None if the user backed out."""
+    lines = _run(choices, ["--header", header])
+
+    return lines[0] if lines else None
+
+
 def many(choices, header, marked=()):
     """Pick several, with `marked` already selected."""
     return _run(

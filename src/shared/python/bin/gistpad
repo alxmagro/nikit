@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
 """gistpad - Keep named notes as secret gists.
 
-    gistpad [-e <editor>]   Pick a note from the list and open it
-    gistpad sync            Rebuild the list from the gists on GitHub
-    ... | gistpad           Create a new note from stdin
-    gistpad < file          Same, reading the body from a file
+Usage: gistpad [-e <editor>] [<command>] [<key>]
+
+Commands:
+  (none)          Pick a note from the list and open it
+  sync            Rebuild the list from the gists on GitHub
+  ls              Print note names, one per line
+  read [<key>]    Print a note's content to stdout, picking it if <key> is
+                  omitted
+  help            Show this help
+
+... | gistpad     Create a new note from stdin
+gistpad < file    Same, reading the body from a file
 
 In the picker: enter opens, f2 renames, ctrl-d deletes, and the first entry
 starts a new note. The note name doubles as the file name, so ending it in an
@@ -31,28 +39,47 @@ INDEX = os.path.join(CACHE, "gistpad.tsv")
 
 
 def main(argv):
+    if "-h" in argv or "--help" in argv:
+        print(__doc__.strip())
+        return 0
+
     # argparse writes its own complaint to stderr before raising; this file
     # prints one usage line and nothing else.
     parser = argparse.ArgumentParser(add_help=False)
     parser.error = lambda message: (_ for _ in ()).throw(SystemExit(2))
     parser.add_argument("-e", "--editor", default=DEFAULT_EDITOR)
     parser.add_argument("action", nargs="?")
+    parser.add_argument("key", nargs="?")
 
     try:
         args = parser.parse_args(argv)
     except SystemExit:
-        print("Usage: gistpad [-e <editor>] | gistpad sync", file=sys.stderr)
+        print(__doc__.strip(), file=sys.stderr)
         return 1
 
-    if args.action not in (None, "sync"):
-        print("Usage: gistpad [-e <editor>] | gistpad sync", file=sys.stderr)
+    if args.action not in (None, "sync", "ls", "read", "help"):
+        print(__doc__.strip(), file=sys.stderr)
         return 1
+
+    if args.key is not None and args.action != "read":
+        print(__doc__.strip(), file=sys.stderr)
+        return 1
+
+    if args.action == "help":
+        print(__doc__.strip())
+        return 0
 
     try:
         gist.ready()
 
         if args.action == "sync":
             return cmd_sync()
+
+        if args.action == "ls":
+            return cmd_ls()
+
+        if args.action == "read":
+            return cmd_read(args.key)
 
         if args.action is None and not sys.stdin.isatty():
             return _finish_create(sys.stdin.read().rstrip("\n"))
@@ -75,6 +102,51 @@ def cmd_sync():
 
     _write_index(notes)
     print(f"Synced {len(notes)} notes.", file=sys.stderr)
+
+    return 0
+
+
+def cmd_ls():
+    """Note names on stdout, one per line, for scripting and piping."""
+    for key in sorted(_index()):
+        print(key)
+
+    return 0
+
+
+def cmd_read(key):
+    """Prints a note's content to stdout, for piping or redirecting to a
+    file. With no key, picks one from the list first."""
+    index = _index()
+
+    if key is not None:
+        gist_id = index.get(key)
+
+        if not gist_id:
+            print(f"No note named '{key}'", file=sys.stderr)
+            return 1
+
+        return _print_note(gist_id)
+
+    if not pick.ready():
+        print("Pick a note by name:", file=sys.stderr)
+        for name in index:
+            print(name, file=sys.stderr)
+        return 1
+
+    key = pick.one(sorted(index), "enter read · ctrl-c exit")
+
+    if not key:
+        return 1
+
+    return _print_note(index[key])
+
+
+def _print_note(gist_id):
+    contents = gist.files(gist_id)
+    filename = next(iter(contents))
+
+    print(contents[filename])
 
     return 0
 
@@ -316,4 +388,15 @@ def _confirm(prompt):
 
 
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    try:
+        rc = main(sys.argv[1:])
+        sys.stdout.flush()
+    except BrokenPipeError:
+        # The reader (e.g. `| echo`) closed its end before we finished
+        # writing. Python flushes stdout again on exit, which would hit the
+        # same closed pipe and print a spurious error; point it at devnull
+        # first so that final flush is a no-op.
+        os.dup2(os.open(os.devnull, os.O_WRONLY), sys.stdout.fileno())
+        sys.exit(1)
+
+    sys.exit(rc)
