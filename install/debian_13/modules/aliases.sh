@@ -17,10 +17,10 @@ alias ..='cd ..'
 
 # docker
 
-alias dcu="sudo docker compose up"
-alias dcd="sudo docker compose down"
-alias dce="sudo docker compose exec"
-alias dcr="sudo docker compose run"
+alias dcu="docker compose up"
+alias dcd="docker compose down"
+alias dce="docker compose exec"
+alias dcr="docker compose run"
 
 dprune-all() {
   docker rm -f $(docker ps -qa) # Remove every container
