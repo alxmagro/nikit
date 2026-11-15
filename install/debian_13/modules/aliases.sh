@@ -21,6 +21,7 @@ alias dcu="docker compose up"
 alias dcd="docker compose down"
 alias dce="docker compose exec"
 alias dcr="docker compose run"
+alias dcrs="docker compose restart"
 
 dprune-all() {
   docker rm -f $(docker ps -qa) # Remove every container
